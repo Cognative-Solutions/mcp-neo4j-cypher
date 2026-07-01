@@ -1,5 +1,6 @@
 import os
 import logging
+import hmac
 from flask import Flask, request, Response
 import httpx
 
@@ -8,20 +9,27 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 TOKEN = os.environ.get("MCP_AUTH_TOKEN", "")
-UPSTREAM = "http://neo4j-cypher.railway.internal:8000"
+UPSTREAM = "http://mcp-neo4j-cypher.railway.internal:8000"
+
+def is_authorized(auth_header: str) -> bool:
+    expected = f"Bearer {TOKEN}"
+    return bool(TOKEN) and hmac.compare_digest(auth_header, expected)
 
 @app.route("/", defaults={"path": ""}, methods=["POST", "GET", "DELETE", "PUT"])
 @app.route("/<path:path>", methods=["POST", "GET", "DELETE", "PUT"])
 def proxy(path):
     auth = request.headers.get("Authorization", "")
-    if auth != f"Bearer {TOKEN}":
+    if not is_authorized(auth):
         return Response(
             '{"jsonrpc":"2.0","id":"auth-error","error":{"code":-32600,"message":"Unauthorized"}}',
             status=401,
             content_type="application/json"
         )
 
+    # Preserve trailing slash from original request path (matters for /mcp/)
     url = f"{UPSTREAM}/{path}"
+    if request.path.endswith("/") and not url.endswith("/"):
+        url += "/"
     if request.query_string:
         url += f"?{request.query_string.decode()}"
 
