@@ -1,9 +1,11 @@
-FROM nginx:latest
+FROM python:3.12-slim
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+WORKDIR /app
+
+RUN pip install --no-cache-dir flask httpx
+
+COPY proxy.py .
 
 EXPOSE 8080
 
-ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python", "proxy.py"]
