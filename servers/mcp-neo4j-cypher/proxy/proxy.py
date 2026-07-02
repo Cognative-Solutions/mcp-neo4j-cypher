@@ -1,6 +1,6 @@
 import os
 import logging
-import hmac
+from urllib.parse import urljoin
 from flask import Flask, request, Response
 import httpx
 
@@ -8,43 +8,45 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-TOKEN = os.environ.get("MCP_AUTH_TOKEN", "")
-UPSTREAM = "http://mcp-neo4j-cypher.railway.internal:8000"
 
-def is_authorized(auth_header: str) -> bool:
-    expected = f"Bearer {TOKEN}"
-    return bool(TOKEN) and hmac.compare_digest(auth_header, expected)
+TOKEN = os.environ["MCP_AUTH_TOKEN"]
+UPSTREAM = os.environ["UPSTREAM_MCP_URL"]
 
-@app.route("/", defaults={"path": ""}, methods=["POST", "GET", "DELETE", "PUT"])
-@app.route("/<path:path>", methods=["POST", "GET", "DELETE", "PUT"])
+@app.route("/", defaults={"path": ""}, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+@app.route("/<path:path>", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 def proxy(path):
     auth = request.headers.get("Authorization", "")
-    if not is_authorized(auth):
+    x_api_key = request.headers.get("X-API-Key", "")
+
+    if auth != f"Bearer {TOKEN}" and x_api_key != TOKEN:
         return Response(
             '{"jsonrpc":"2.0","id":"auth-error","error":{"code":-32600,"message":"Unauthorized"}}',
             status=401,
             content_type="application/json"
         )
 
-    # Preserve trailing slash from original request path (matters for /mcp/)
-    url = f"{UPSTREAM}/{path}"
-    if request.path.endswith("/") and not url.endswith("/"):
-        url += "/"
+    forwarded_path = path or ""
+    if forwarded_path == "mcp":
+        forwarded_path = ""
+    elif forwarded_path.startswith("mcp/"):
+        forwarded_path = forwarded_path[4:]
+
+    url = urljoin(UPSTREAM, forwarded_path)
     if request.query_string:
         url += f"?{request.query_string.decode()}"
 
-    logger.info(f"Forwarding {request.method} {url}")
-
     try:
         forward_headers = {
-            "Content-Type": request.headers.get("Content-Type", "application/json"),
             "Accept": request.headers.get("Accept", "application/json, text/event-stream"),
         }
+
+        if request.headers.get("Content-Type"):
+            forward_headers["Content-Type"] = request.headers["Content-Type"]
 
         resp = httpx.request(
             request.method,
             url,
-            content=request.data,
+            content=request.get_data(),
             headers=forward_headers,
             timeout=60.0,
         )
@@ -54,15 +56,14 @@ def proxy(path):
 
         return Response(resp.content, status=resp.status_code, headers=response_headers)
 
-    except httpx.ConnectError as e:
-        logger.error(f"Connection error to {url}: {e}")
+    except httpx.ConnectError:
         return Response(
             '{"jsonrpc":"2.0","id":"proxy-error","error":{"code":-32600,"message":"Cannot connect to upstream MCP server"}}',
             status=502,
             content_type="application/json"
         )
     except Exception as e:
-        logger.error(f"Proxy error: {type(e).__name__}: {e}")
+        logger.exception("Proxy error")
         return Response(
             f'{{"jsonrpc":"2.0","id":"proxy-error","error":{{"code":-32600,"message":"Proxy error: {type(e).__name__}"}}}}',
             status=502,
